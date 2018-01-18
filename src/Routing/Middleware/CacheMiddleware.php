@@ -12,199 +12,216 @@ use Cake\Utility\Inflector;
  */
 class CacheMiddleware {
 
-	use InstanceConfigTrait;
+    use InstanceConfigTrait;
 
-	/**
-	 * @var array
-	 */
-	protected $_defaultConfig = [
-		'when' => null,
-		'cacheTime' => '+1 day',
-	];
+    /**
+     * @var array
+     */
+    protected $_defaultConfig = [
+        'when' => null,
+        'cacheTime' => '+1 day',
+    ];
 
-	/**
-	 * @var string|null
-	 */
-	protected $_cacheContent;
+    /**
+     * @var string|null
+     */
+    protected $_cacheContent;
 
-	/**
-	 * @var array|null
-	 */
-	protected $_cacheInfo;
+    /**
+     * @var array|null
+     */
+    protected $_cacheInfo;
 
-	/**
-	 * @param array $config
-	 */
-	public function __construct(array $config = []) {
-		$this->config($config);
-	}
+    /**
+     * @param array $config
+     */
+    public function __construct(array $config = []) {
+        $this->config($config);
+    }
 
-	/**
-	 * Checks if a requested cache file exists and sends it to the browser.
-	 *
-	 * @param \Psr\Http\Message\ServerRequestInterface $request The request.
-	 * @param \Psr\Http\Message\ResponseInterface $response The response.
-	 * @param callable $next The next middleware to call.
-	 * @return \Psr\Http\Message\ResponseInterface A response.
-	 */
-	public function __invoke(Request $request, Response $response, $next) {
-		if (Configure::read('Cache.check') === false) {
-			return $next($request, $response);
-		}
-		/** @var callable $when */
-		$when = $this->config('when');
-		if ($when !== null && $when($request, $request) !== true) {
-			return $next($request, $response);
-		}
+    /**
+     * Checks if a requested cache file exists and sends it to the browser.
+     *
+     * @param \Psr\Http\Message\ServerRequestInterface $request The request.
+     * @param \Psr\Http\Message\ResponseInterface $response The response.
+     * @param callable $next The next middleware to call.
+     * @return \Psr\Http\Message\ResponseInterface A response.
+     */
+    public function __invoke(Request $request, Response $response, $next) {
+        if (Configure::read('Cache.check') === false) {
+            return $next($request, $response);
+        }
 
-		/** @var \Cake\Http\ServerRequest $request */
-		$url = $request->here();
-		$url = str_replace($request->base, '', $url);
-		$file = $this->getFile($url);
+        /** @var callable $when */
+        $when = $this->config('when');
+        if ($when !== null && $when($request, $request) !== true) {
+            //If Request is not cacheable, dont cache and just return
+            return $next($request, $response);
+        }
 
-		if ($file === null) {
-			return $next($request, $response);
-		}
+        /** @var \Cake\Http\ServerRequest $request */
+        $url = $request->here();
+        $url = str_replace($request->base, '', $url);
+        $file = $this->getFile($url);
 
-		$cacheContent = $this->extractCacheContent($file);
-		$cacheInfo = $this->extractCacheInfo($cacheContent);
-		$cacheTime = $cacheInfo['time'];
+        if ($file === null) {
+            //If there is no cache file just proceed
+            return $next($request, $response);
+        }
 
-		if ($cacheTime < time() && $cacheTime !== 0) {
-			unlink($file);
-			return $next($request, $response);
-		}
+        $cacheContent = $this->extractCacheContent($file);
+        $cacheInfo = $this->extractCacheInfo($cacheContent);
+        $cacheTime = $cacheInfo['time'];
 
-		/** @var \Cake\Http\Response $response */
-		$response = $response->withModified(filemtime($file));
-		if ($response->checkNotModified($request)) {
-			return $response;
-		}
+        if ($cacheTime < time() && $cacheTime !== 0) {
+            //If cache has expired and caching is enabled delete the cache file
+            //and proceed
+            unlink($file);
+            return $next($request, $response);
+        }
 
-		$pathSegments = explode('.', $file);
-		$ext = array_pop($pathSegments);
-		$response = $this->_deliverCacheFile($request, $response, $file, $ext);
+        /** @var \Cake\Http\Response $response */
+        $response = $response->withModified(filemtime($file));
 
-		return $response;
-	}
+        if ($response->checkNotModified($request)) {
+            //If Response is not modified respond with a 304 not modified instead
+            //of delivering anything
+            return $response;
+        }
 
-	/**
-	 * @param string $url
-	 * @param bool $mustExist
-	 *
-	 * @return string
-	 */
-	public function getFile($url, $mustExist = true) {
-		if ($url === '/') {
-			$url = '_root';
-		}
+        $pathSegments = explode('.', $file);
+        $ext = array_pop($pathSegments);
 
-		$path = $url;
-		$prefix = Configure::read('Cache.prefix');
-		if ($prefix) {
-			$path = $prefix . '_' . $path;
-		}
+        //Deliver a cached version of the page that was requested
+        $response = $this->_deliverCacheFile($request, $response, $file, $ext);
 
-		if ($url !== '_root') {
-			$path = Inflector::slug($path);
-		}
+        return $response;
+    }
 
-		$folder = CACHE . 'views' . DS;
-		$file = $folder . $path . '.html';
-		if ($mustExist && !file_exists($file)) {
-			return null;
-		}
-		return $file;
-	}
+    /**
+     * Concatenates the file path for a given url and optionally checks if the file
+     * exists (only if $mustExist == true).
+     *
+     * @param string $url the url to find the filepath for
+     * @param bool $mustExist whether the file on filepath for the url must exist
+     *
+     * @return string|null null if $mustExist == true and the file does not exist, filepath otherwise
+     */
+    public function getFile($url, $mustExist = true) {
+        if ($url === '/') {
+            $url = '_root';
+        }
 
-	/**
-	 * @param string &$content
-	 *
-	 * @return array Time/Ext
-	 */
-	public function extractCacheInfo(&$content) {
-		if ($this->_cacheInfo) {
-			return $this->_cacheInfo;
-		}
+        $path = $url;
+        $prefix = Configure::read('Cache.prefix');
+        if ($prefix) {
+            $path = $prefix . '_' . $path;
+        }
 
-		$cacheTime = 0;
-		$cacheExt = 'html';
-		$this->_cacheContent = preg_replace_callback('/^\<\!--cachetime\:(\d+);ext\:(\w+)--\>/', function ($matches) use (&$cacheTime, &$cacheExt) {
-			$cacheTime = $matches[1];
-			$cacheExt = $matches[2];
-			return '';
-		}, $this->_cacheContent);
+        if ($url !== '_root') {
+            $path = Inflector::slug($path);
+        }
 
-		$this->_cacheInfo = [
-			'time' => (int)$cacheTime,
-			'ext' => $cacheExt
-		];
+        $folder = CACHE . 'views' . DS;
+        $file = $folder . $path . '.html';
+        if ($mustExist && !file_exists($file)) {
+            return null;
+        }
+        return $file;
+    }
 
-		return $this->_cacheInfo;
-	}
+    /**
+     * @param string &$content
+     *
+     * @return array Time/Ext
+     */
+    public function extractCacheInfo(&$content) {
+        if ($this->_cacheInfo) {
+            return $this->_cacheInfo;
+        }
 
-	/**
-	 * @param string $file
-	 *
-	 * @return string
-	 */
-	protected function extractCacheContent($file) {
-		if ($this->_cacheContent !== null) {
-			return $this->_cacheContent;
-		}
+        $cacheTime = 0;
+        $cacheExt = 'html';
+        $this->_cacheContent = preg_replace_callback('/^\<\!--cachetime\:(\d+);ext\:(\w+)--\>/', function ($matches) use (&$cacheTime, &$cacheExt) {
+            $cacheTime = $matches[1];
+            $cacheExt = $matches[2];
+            return '';
+        }, $this->_cacheContent);
 
-		$this->_cacheContent = (string)file_get_contents($file);
+        $this->_cacheInfo = [
+            'time' => (int)$cacheTime,
+            'ext' => $cacheExt
+        ];
 
-		return $this->_cacheContent;
-	}
+        return $this->_cacheInfo;
+    }
 
-	/**
-	 * Sends an asset file to the client
-	 *
-	 * @param \Cake\Http\ServerRequest $request The request object to use.
-	 * @param \Cake\Http\Response $response The response object to use.
-	 * @param string $file Path to the asset file in the file system
-	 * @param string $ext The extension of the file to determine its mime type
-	 *
-	 * @return \Cake\Http\Response
-	 */
-	protected function _deliverCacheFile(Request $request, Response $response, $file, $ext) {
-		$compressionEnabled = $response->compress();
-		if ($response->type() === $ext) {
-			$contentType = 'application/octet-stream';
-			$agent = $request->env('HTTP_USER_AGENT');
-			if (preg_match('%Opera(/| )([0-9].[0-9]{1,2})%', $agent) || preg_match('/MSIE ([0-9].[0-9]{1,2})/', $agent)) {
-				$contentType = 'application/octetstream';
-			}
+    /**
+     * @param string $file
+     *
+     * @return string
+     */
+    protected function extractCacheContent($file) {
+        if ($this->_cacheContent !== null) {
+            return $this->_cacheContent;
+        }
 
-			$response = $response->withType($contentType);
-		}
+        $this->_cacheContent = (string)file_get_contents($file);
 
-		if (!$compressionEnabled) {
-			$response = $response->withHeader('Content-Length', (string)filesize($file));
-		}
+        return $this->_cacheContent;
+    }
 
-		$cacheContent = $this->_cacheContent;
-		$cacheInfo = $this->_cacheInfo;
+    /**
+     * Sends an asset file to the client
+     *
+     * @param \Cake\Http\ServerRequest $request The request object to use.
+     * @param \Cake\Http\Response $response The response object to use.
+     * @param string $file Path to the asset file in the file system
+     * @param string $ext The extension of the file to determine its mime type
+     *
+     * @return \Cake\Http\Response
+     */
+    protected function _deliverCacheFile(Request $request, Response $response, $file, $ext) {
+        $compressionEnabled = $response->compress();
+        if ($response->type() === $ext) {
+            $contentType = 'application/octet-stream';
+            $agent = $request->env('HTTP_USER_AGENT');
+            if (preg_match('%Opera(/| )([0-9].[0-9]{1,2})%', $agent) || preg_match('/MSIE ([0-9].[0-9]{1,2})/', $agent)) {
+                $contentType = 'application/octetstream';
+            }
 
-		$modifiedTime = filemtime($file);
-		$cacheTime = $cacheInfo['time'];
-		if (!$cacheTime) {
-			$cacheTime = $this->config('cacheTime');
-		}
+            //respond with correct mime type
+            $response = $response->withType($contentType);
+        }
 
-		$response = $response->withCache($modifiedTime, $cacheTime);
-		$response = $response->withType($cacheInfo['ext']);
+        if (!$compressionEnabled) {
+            //if there is no compression supply the content-length
+            $response = $response->withHeader('Content-Length', (string)filesize($file));
+        }
 
-		if (Configure::read('debug') || $this->config('debug')) {
-			if ($cacheInfo['ext'] === 'html') {
-				$cacheContent = '<!--created:' . date('Y-m-d H:i:s', $modifiedTime) . '-->' . $cacheContent;
-			}
-		}
+        $cacheContent = $this->_cacheContent;
+        $cacheInfo = $this->_cacheInfo;
 
-		$body = $response->getBody();
-		$body->write($cacheContent);
-		return $response->withBody($body);
-	}
+        $modifiedTime = filemtime($file);
+        $cacheTime = $cacheInfo['time'];
+        if (!$cacheTime) {
+            $cacheTime = $this->config('cacheTime');
+        }
+
+        $response = $response->withCache($modifiedTime, $cacheTime);
+        $response = $response->withType($cacheInfo['ext']);
+
+        if (Configure::read('debug') || $this->config('debug')) {
+            if ($cacheInfo['ext'] === 'html') {
+                $cacheContent = '<!--created:' . date('Y-m-d H:i:s', $modifiedTime) . '-->' . $cacheContent;
+            }
+        }
+
+        $body = $response->getBody();
+        $body->write($cacheContent);
+
+        return $response->withBody($body)
+            ->withETag(sha1($body));
+    }
 
 }
