@@ -54,7 +54,7 @@ class CacheMiddleware {
 
         /** @var callable $when */
         $when = $this->config('when');
-        if ($when !== null && $when($request, $request) !== true) {
+        if ($when !== null && $when($request, $response) !== true) {
             //If Request is not cacheable, dont cache and just return
             return $next($request, $response);
         }
